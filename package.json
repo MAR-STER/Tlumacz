@@ -1,6 +1,6 @@
 {
   "name": "tlumacz-napisow",
-  "version": "0.1.0",
+  "version": "0.2.4",
   "private": true,
   "scripts": {
     "dev": "next dev",
@@ -8,6 +8,7 @@
     "start": "next start"
   },
   "dependencies": {
+    "jszip": "^3.10.1",
     "next": "^16.0.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0"
