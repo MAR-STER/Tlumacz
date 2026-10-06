@@ -1,31 +1,47 @@
 "use client";
 
+import JSZip from "jszip";
 import { useMemo, useRef, useState } from "react";
 import {
+  basename,
   outputFilename,
   parseSubtitles,
   renderSubtitles,
+  zipFilename,
   type SubtitleDocument,
+  type TargetLanguage,
 } from "../lib/subtitles";
 
 type Translation = { id: string; text: string };
+type LanguagePair = "en-pl" | "pl-en";
 
-const BATCH_SIZE = 80;
-const CONTEXT_SIZE = 12;
+const BATCH_SIZE = 40;
+const CONTEXT_SIZE = 10;
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function subtitleExtension(name: string) {
+  const lower = name.toLowerCase();
+  if (lower.endsWith(".srt")) return "srt";
+  if (lower.endsWith(".vtt")) return "vtt";
+  return null;
+}
+
 export default function Home() {
-  const [file, setFile] = useState<File | null>(null);
+  const [sourceName, setSourceName] = useState("");
+  const [inputContainerName, setInputContainerName] = useState("");
   const [doc, setDoc] = useState<SubtitleDocument | null>(null);
   const [style, setStyle] = useState("natural");
+  const [languagePair, setLanguagePair] = useState<LanguagePair>("en-pl");
   const [progress, setProgress] = useState(0);
-  const [status, setStatus] = useState("Wybierz plik .srt lub .vtt");
+  const [status, setStatus] = useState("Wybierz plik .srt, .vtt lub .zip");
   const [running, setRunning] = useState(false);
   const [downloadUrl, setDownloadUrl] = useState<string | null>(null);
   const [downloadName, setDownloadName] = useState("");
+  const [pasteOpen, setPasteOpen] = useState(false);
+  const [pastedText, setPastedText] = useState("");
   const stopRef = useRef(false);
 
   const batches = useMemo(
@@ -33,29 +49,83 @@ export default function Home() {
     [doc]
   );
 
-  async function onFile(next: File | null) {
+  const targetLanguage: TargetLanguage = languagePair === "pl-en" ? "en" : "pl";
+
+  function clearOutput() {
     if (downloadUrl) URL.revokeObjectURL(downloadUrl);
     setDownloadUrl(null);
+    setDownloadName("");
     setProgress(0);
-    setFile(next);
+  }
+
+  function loadParsed(raw: string, filename: string, containerName = "") {
+    const parsed = parseSubtitles(raw, filename);
+    setSourceName(basename(filename));
+    setInputContainerName(containerName);
+    setDoc(parsed);
+    setStatus(
+      `${parsed.cues.length} segmentów • ${parsed.format.toUpperCase()} • ${Math.ceil(
+        parsed.cues.length / BATCH_SIZE
+      )} paczek${containerName ? ` • z ${containerName}` : ""}`
+    );
+  }
+
+  async function onFile(next: File | null) {
+    clearOutput();
     setDoc(null);
+    setSourceName("");
+    setInputContainerName("");
 
     if (!next) {
-      setStatus("Wybierz plik .srt lub .vtt");
+      setStatus("Wybierz plik .srt, .vtt lub .zip");
       return;
     }
 
     try {
-      const raw = await next.text();
-      const parsed = parseSubtitles(raw, next.name);
-      setDoc(parsed);
-      setStatus(
-        `${parsed.cues.length} segmentów • ${parsed.format.toUpperCase()} • około ${Math.ceil(
-          parsed.cues.length / BATCH_SIZE
-        )} paczek`
-      );
+      const lower = next.name.toLowerCase();
+
+      if (lower.endsWith(".zip")) {
+        setStatus("Odczytuję archiwum ZIP…");
+        const zip = await JSZip.loadAsync(await next.arrayBuffer());
+        const subtitleEntries = Object.values(zip.files).filter(
+          (entry) => !entry.dir && subtitleExtension(entry.name)
+        );
+
+        if (!subtitleEntries.length) {
+          throw new Error("ZIP nie zawiera pliku .srt ani .vtt.");
+        }
+        if (subtitleEntries.length > 1) {
+          throw new Error(
+            `ZIP zawiera ${subtitleEntries.length} pliki napisów. Umieść w archiwum dokładnie jeden plik .srt lub .vtt.`
+          );
+        }
+
+        const entry = subtitleEntries[0];
+        const raw = await entry.async("string");
+        loadParsed(raw, entry.name, next.name);
+        return;
+      }
+
+      if (!subtitleExtension(next.name)) {
+        throw new Error("Obsługiwane są pliki .srt, .vtt oraz .zip.");
+      }
+
+      loadParsed(await next.text(), next.name);
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Nie udało się odczytać pliku.");
+      setStatus(error instanceof Error ? `Błąd: ${error.message}` : "Nie udało się odczytać pliku.");
+    }
+  }
+
+  function loadPasted() {
+    clearOutput();
+    try {
+      const trimmed = pastedText.trim();
+      if (!trimmed) throw new Error("Pole z napisami jest puste.");
+      const filename = /^WEBVTT\b/i.test(trimmed) ? "wklejone.vtt" : "wklejone.srt";
+      loadParsed(pastedText, filename);
+      setPasteOpen(false);
+    } catch (error) {
+      setStatus(error instanceof Error ? `Błąd: ${error.message}` : "Nie udało się odczytać napisów.");
     }
   }
 
@@ -70,7 +140,12 @@ export default function Home() {
         const response = await fetch("/api/translate", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ items, contextBefore, style }),
+          body: JSON.stringify({
+            items,
+            contextBefore,
+            style,
+            targetLanguage,
+          }),
         });
 
         const data = await response.json();
@@ -80,29 +155,53 @@ export default function Home() {
         if (!Array.isArray(data?.translations)) {
           throw new Error("Serwer zwrócił nieprawidłową odpowiedź.");
         }
-        return data.translations as Translation[];
+
+        const translations = data.translations as Translation[];
+        const expected = new Set(items.map((item) => item.id));
+        const received = new Set<string>();
+
+        for (const item of translations) {
+          if (
+            !item ||
+            typeof item.id !== "string" ||
+            typeof item.text !== "string" ||
+            item.text.trim() === "" ||
+            !expected.has(item.id) ||
+            received.has(item.id)
+          ) {
+            throw new Error("Serwer zwrócił niepełną lub zduplikowaną paczkę.");
+          }
+          received.add(item.id);
+        }
+
+        if (translations.length !== items.length || received.size !== items.length) {
+          throw new Error(
+            `Niepełna paczka: otrzymano ${received.size}/${items.length} segmentów.`
+          );
+        }
+
+        return translations;
       } catch (error) {
         lastError = error instanceof Error ? error.message : lastError;
         if (attempt < 3) await sleep(1200 * attempt);
       }
     }
+
     throw new Error(lastError);
   }
 
   async function start() {
-    if (!doc || !file || running) return;
+    if (!doc || !sourceName || running) return;
 
     setRunning(true);
-    if (downloadUrl) URL.revokeObjectURL(downloadUrl);
-    setDownloadUrl(null);
-    setProgress(0);
+    clearOutput();
     stopRef.current = false;
     const translated = new Map<string, string>();
 
     try {
       for (let offset = 0; offset < doc.cues.length; offset += BATCH_SIZE) {
         if (stopRef.current) {
-          setStatus("Tłumaczenie zatrzymane.");
+          setStatus("Tłumaczenie zatrzymane. Nie utworzono niepełnego pliku.");
           return;
         }
 
@@ -120,26 +219,52 @@ export default function Home() {
           contextBefore
         );
 
-        for (const item of result) translated.set(item.id, item.text);
+        for (const item of result) translated.set(item.id, item.text.trim());
 
-        const done = Math.min(offset + current.length, doc.cues.length);
-        setProgress(Math.round((done / doc.cues.length) * 100));
+        const expectedDone = Math.min(offset + current.length, doc.cues.length);
+        if (translated.size !== expectedDone) {
+          throw new Error(
+            `Kontrola kompletności nie powiodła się: ${translated.size}/${expectedDone}.`
+          );
+        }
+
+        setProgress(Math.round((expectedDone / doc.cues.length) * 100));
       }
 
+      if (translated.size !== doc.cues.length) {
+        throw new Error(
+          `Tłumaczenie jest niekompletne: ${translated.size}/${doc.cues.length} segmentów.`
+        );
+      }
+
+      for (const cue of doc.cues) {
+        if (!translated.get(cue.id)?.trim()) {
+          throw new Error(`Brak tłumaczenia dla segmentu ${cue.ordinal}.`);
+        }
+      }
+
+      setStatus("Sprawdzam kompletność i tworzę archiwum ZIP…");
       const output = renderSubtitles(doc, translated);
-      const blob = new Blob([output], {
-        type:
-          doc.format === "vtt"
-            ? "text/vtt;charset=utf-8"
-            : "application/x-subrip;charset=utf-8",
+      const subtitleName = outputFilename(sourceName, doc.format, targetLanguage);
+      const archiveName = zipFilename(sourceName, targetLanguage);
+
+      const zip = new JSZip();
+      zip.file(subtitleName, output);
+      const blob = await zip.generateAsync({
+        type: "blob",
+        compression: "DEFLATE",
+        compressionOptions: { level: 6 },
       });
       const url = URL.createObjectURL(blob);
 
       setDownloadUrl(url);
-      setDownloadName(outputFilename(file.name, doc.format));
-      setStatus("Gotowe. Plik został przetłumaczony i scalony.");
+      setDownloadName(archiveName);
+      setStatus(
+        `Gotowe. Sprawdzono ${doc.cues.length}/${doc.cues.length} segmentów. Wynik zapisano w ZIP.`
+      );
       setProgress(100);
     } catch (error) {
+      clearOutput();
       setStatus(
         error instanceof Error ? `Błąd: ${error.message}` : "Wystąpił nieznany błąd."
       );
@@ -148,6 +273,8 @@ export default function Home() {
     }
   }
 
+  const directionLabel = languagePair === "pl-en" ? "PL → EN" : "EN → PL";
+
   return (
     <main className="shell">
       <section className="hero">
@@ -155,28 +282,69 @@ export default function Home() {
           <p className="eyebrow">MAR-STER • AI Subtitle Translator</p>
           <h1>Tłumacz napisów</h1>
           <p className="lead">
-            Kontekstowe tłumaczenie angielskich napisów na naturalny polski.
-            Obsługa SRT i VTT, tłumaczenie partiami i automatyczne scalenie gotowego pliku.
+            Tłumaczenie SRT i VTT między polskim i angielskim. Importuj bezpośrednio plik napisów
+            albo ZIP. Gotowy wynik jest zawsze sprawdzany i pakowany do ZIP przed pobraniem.
           </p>
         </div>
-        <div className="badge">EN → PL</div>
+        <div className="badge">{directionLabel}</div>
       </section>
 
       <section className="card">
         <label className="drop">
           <input
             type="file"
-            accept=".srt,.vtt,application/x-subrip,text/vtt"
+            accept=".srt,.vtt,.zip,application/x-subrip,text/vtt,application/zip,application/x-zip-compressed"
             disabled={running}
             onChange={(event) => void onFile(event.target.files?.[0] ?? null)}
           />
           <span className="dropTitle">
-            {file ? file.name : "Wybierz plik napisów"}
+            {sourceName
+              ? inputContainerName
+                ? `${inputContainerName} → ${sourceName}`
+                : sourceName
+              : "Wybierz plik napisów lub ZIP"}
           </span>
-          <span className="dropHint">SRT lub WebVTT (.vtt)</span>
+          <span className="dropHint">SRT, WebVTT lub ZIP zawierający jeden plik SRT/VTT</span>
         </label>
 
+        <div className="pasteActions">
+          <button
+            className="secondary"
+            type="button"
+            disabled={running}
+            onClick={() => setPasteOpen((value) => !value)}
+          >
+            {pasteOpen ? "Ukryj wklejanie" : "Wklej napisy ręcznie"}
+          </button>
+        </div>
+
+        {pasteOpen && (
+          <div className="pastePanel">
+            <textarea
+              value={pastedText}
+              onChange={(event) => setPastedText(event.target.value)}
+              placeholder="Wklej tutaj pełną zawartość pliku SRT lub VTT…"
+              disabled={running}
+            />
+            <button className="secondary" type="button" onClick={loadPasted} disabled={running}>
+              Załaduj wklejone napisy
+            </button>
+          </div>
+        )}
+
         <div className="controls">
+          <label>
+            Kierunek
+            <select
+              value={languagePair}
+              onChange={(event) => setLanguagePair(event.target.value as LanguagePair)}
+              disabled={running}
+            >
+              <option value="en-pl">Angielski → polski</option>
+              <option value="pl-en">Polski → angielski</option>
+            </select>
+          </label>
+
           <label>
             Styl tłumaczenia
             <select
@@ -190,9 +358,18 @@ export default function Home() {
             </select>
           </label>
 
-          <div className="stat"><span>Segmenty</span><strong>{doc?.cues.length ?? "—"}</strong></div>
-          <div className="stat"><span>Paczki</span><strong>{batches || "—"}</strong></div>
-          <div className="stat"><span>Format</span><strong>{doc?.format.toUpperCase() ?? "—"}</strong></div>
+          <div className="stat">
+            <span>Segmenty</span>
+            <strong>{doc?.cues.length ?? "—"}</strong>
+          </div>
+          <div className="stat">
+            <span>Paczki</span>
+            <strong>{batches || "—"}</strong>
+          </div>
+          <div className="stat">
+            <span>Format</span>
+            <strong>{doc?.format.toUpperCase() ?? "—"}</strong>
+          </div>
         </div>
 
         <div className="progressTrack" aria-label="Postęp tłumaczenia">
@@ -223,7 +400,7 @@ export default function Home() {
 
           {downloadUrl && (
             <a className="download" href={downloadUrl} download={downloadName}>
-              Pobierz {downloadName}
+              Pobierz ZIP: {downloadName}
             </a>
           )}
         </div>
@@ -231,16 +408,16 @@ export default function Home() {
 
       <section className="info">
         <article>
-          <h2>Kontekst między paczkami</h2>
-          <p>Każda kolejna paczka dostaje poprzednie kwestie wraz z ich polskim tłumaczeniem.</p>
+          <h2>Import ZIP</h2>
+          <p>Możesz wskazać ZIP zawierający jeden plik SRT lub VTT. Archiwum jest rozpakowywane w przeglądarce.</p>
         </article>
         <article>
-          <h2>Synchronizacja bez zmian</h2>
-          <p>Timestamps i ustawienia cue pozostają po stronie aplikacji. AI tłumaczy wyłącznie tekst.</p>
+          <h2>Kontrola kompletności</h2>
+          <p>Każda paczka jest sprawdzana. Pobieranie pojawia się dopiero po przetłumaczeniu wszystkich segmentów.</p>
         </article>
         <article>
-          <h2>SRT i VTT</h2>
-          <p>Program rozpoznaje format i zapisuje wynik w tym samym formacie co plik wejściowy.</p>
+          <h2>Eksport ZIP</h2>
+          <p>Gotowy SRT lub VTT jest automatycznie pakowany do ZIP i dopiero wtedy udostępniany do pobrania.</p>
         </article>
       </section>
     </main>
