@@ -3,7 +3,7 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "Tłumacz napisów AI",
-  description: "Kontekstowe tłumaczenie napisów SRT i VTT z angielskiego na polski.",
+  description: "Kontekstowe tłumaczenie napisów SRT i VTT między polskim i angielskim.",
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
