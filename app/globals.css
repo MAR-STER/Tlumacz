@@ -22,7 +22,7 @@ body {
   font-family: Arial, Helvetica, sans-serif;
 }
 
-button, select, input { font: inherit; }
+button, select, input, textarea { font: inherit; }
 
 .shell {
   width: min(1050px, calc(100% - 32px));
@@ -94,9 +94,33 @@ h1 {
 .dropTitle { font-size: 20px; font-weight: 700; overflow-wrap: anywhere; }
 .dropHint { margin-top: 8px; color: var(--muted); }
 
+.pasteActions { margin-top: 12px; }
+
+.pastePanel {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: #0d121b;
+}
+
+.pastePanel textarea {
+  width: 100%;
+  min-height: 180px;
+  resize: vertical;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #080b10;
+  color: var(--text);
+  padding: 12px;
+  outline: none;
+}
+
 .controls {
   display: grid;
-  grid-template-columns: minmax(210px, 2fr) repeat(3, 1fr);
+  grid-template-columns: minmax(170px, 1.4fr) minmax(190px, 1.6fr) repeat(3, 1fr);
   gap: 12px;
   margin-top: 18px;
 }
@@ -172,7 +196,7 @@ select {
   color: #07101f;
 }
 
-.primary:disabled {
+.primary:disabled, .secondary:disabled {
   opacity: .45;
   cursor: not-allowed;
 }
@@ -204,10 +228,16 @@ select {
 .info h2 { margin: 0 0 8px; font-size: 15px; }
 .info p { margin: 0; color: var(--muted); line-height: 1.5; font-size: 14px; }
 
+@media (max-width: 900px) {
+  .controls { grid-template-columns: 1fr 1fr; }
+  .controls label { grid-column: auto; }
+}
+
 @media (max-width: 760px) {
   .shell { width: min(100% - 22px, 1050px); padding-top: 28px; }
   .hero { flex-direction: column; }
   .controls { grid-template-columns: 1fr 1fr; }
   .controls label { grid-column: 1 / -1; }
   .info { grid-template-columns: 1fr; }
+  .statusRow { align-items: flex-start; }
 }
