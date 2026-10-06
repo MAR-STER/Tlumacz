@@ -1,4 +1,5 @@
 export type SubtitleFormat = "srt" | "vtt";
+export type TargetLanguage = "pl" | "en";
 
 export type SubtitleCue = {
   id: string;
@@ -34,6 +35,7 @@ function splitBlocks(input: string): string[][] {
       current.push(line);
     }
   }
+
   if (current.length) blocks.push(current);
   return blocks;
 }
@@ -41,16 +43,18 @@ function splitBlocks(input: string): string[][] {
 function parseTiming(line: string) {
   const arrow = line.indexOf("-->");
   if (arrow < 0) return null;
+
   const left = line.slice(0, arrow).trim();
   const right = line.slice(arrow + 3).trim();
   const rightParts = right.split(/\s+/);
+
   if (!left || !rightParts[0]) return null;
   return { start: left, end: rightParts[0] };
 }
 
 export function detectFormat(filename: string, raw: string): SubtitleFormat {
-  const lower = filename.toLowerCase();
-  if (lower.endsWith(".vtt") || raw.replace(/^\uFEFF/, "").trimStart().startsWith("WEBVTT")) return "vtt";
+  const clean = raw.replace(/^\uFEFF/, "").trimStart();
+  if (clean.startsWith("WEBVTT") || filename.toLowerCase().endsWith(".vtt")) return "vtt";
   return "srt";
 }
 
@@ -102,28 +106,64 @@ export function parseSubtitles(raw: string, filename: string): SubtitleDocument 
     });
   }
 
-  if (!cues.length) throw new Error("Nie znaleziono prawidłowych segmentów napisów.");
+  if (!cues.length) {
+    throw new Error("Nie znaleziono prawidłowych segmentów napisów.");
+  }
 
   return { format, cues, blocks };
 }
 
-export function renderSubtitles(doc: SubtitleDocument, translations: Map<string, string>): string {
+export function renderSubtitles(
+  doc: SubtitleDocument,
+  translations: Map<string, string>
+): string {
   const rendered = doc.blocks.map((block) => {
     if (block.kind === "meta") return block.lines.join("\n");
+
     const translated = translations.get(block.cueId);
-    if (translated == null) throw new Error(`Brak tłumaczenia dla ${block.cueId}.`);
-    return [...block.prefix, block.timing, ...translated.split("\n"), ...block.suffix].join("\n");
+    if (translated == null || translated.trim() === "") {
+      throw new Error(`Brak tłumaczenia dla ${block.cueId}.`);
+    }
+
+    return [
+      ...block.prefix,
+      block.timing,
+      ...translated.split("\n"),
+      ...block.suffix,
+    ].join("\n");
   });
 
   let output = rendered.join("\n\n").trimEnd() + "\n";
   if (doc.format === "vtt" && !output.trimStart().startsWith("WEBVTT")) {
     output = "WEBVTT\n\n" + output;
   }
+
   return output;
 }
 
-export function outputFilename(filename: string, format: SubtitleFormat) {
+export function basename(path: string) {
+  const normalized = path.replace(/\\/g, "/");
+  return normalized.split("/").filter(Boolean).pop() || "napisy.srt";
+}
+
+export function outputFilename(
+  filename: string,
+  format: SubtitleFormat,
+  targetLanguage: TargetLanguage
+) {
   const ext = format === "vtt" ? ".vtt" : ".srt";
-  const withoutExt = filename.replace(/\.(srt|vtt)$/i, "");
-  return `${withoutExt}_PL${ext}`;
+  const cleanName = basename(filename);
+  const withoutExt = cleanName.replace(/\.(srt|vtt)$/i, "");
+  const suffix = targetLanguage === "en" ? "EN" : "PL";
+  return `${withoutExt}_${suffix}${ext}`;
+}
+
+export function zipFilename(
+  filename: string,
+  targetLanguage: TargetLanguage
+) {
+  const cleanName = basename(filename);
+  const withoutExt = cleanName.replace(/\.(srt|vtt)$/i, "");
+  const suffix = targetLanguage === "en" ? "EN" : "PL";
+  return `${withoutExt}_${suffix}.zip`;
 }
